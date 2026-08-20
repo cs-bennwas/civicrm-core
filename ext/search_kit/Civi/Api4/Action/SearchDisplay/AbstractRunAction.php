@@ -968,7 +968,38 @@ abstract class AbstractRunAction extends \Civi\Api4\Generic\AbstractAction {
         $condition[2] = \CRM_Core_Config::domainID();
       }
     }
+    // Convert the conditional value of 'user_contact_id' into the id of the current user,
+    // the same way FormattingUtil does it for api where-clauses.
+    if (isset($condition[2]) && self::isContactIdField($field) && in_array($op, self::CONTACT_ID_OPERATORS, TRUE)) {
+      $resolve = fn($value) => FormattingUtil::resolveContactID($condition[0], $value) ?? $value;
+      $condition[2] = is_array($condition[2]) ? array_map($resolve, $condition[2]) : $resolve($condition[2]);
+    }
     return self::filterCompare($data, $condition);
+  }
+
+  /**
+   * Operators for which a contact reference value may be given as 'user_contact_id'.
+   *
+   * Mirrors the list used by FormattingUtil when formatting api input values.
+   */
+  private const CONTACT_ID_OPERATORS = ['=', '!=', '<>', 'IN', 'NOT IN', 'CONTAINS', 'NOT CONTAINS'];
+
+  /**
+   * Does this field hold a contact id?
+   *
+   * True both for contact reference fields (e.g. `Participant.contact_id`) and for the
+   * id field of a joined contact (e.g. `Participant_Contact_contact_id_01.id`), which is
+   * how the admin UI presents the same thing when the search joins to Contact.
+   *
+   * @param array|null $field
+   * @return bool
+   */
+  private static function isContactIdField(?array $field): bool {
+    $fkEntity = $field['fk_entity'] ?? NULL;
+    if (!$fkEntity && ($field['name'] ?? NULL) === 'id') {
+      $fkEntity = $field['entity'] ?? NULL;
+    }
+    return is_string($fkEntity) && CoreUtil::isContact($fkEntity);
   }
 
   /**
@@ -1010,6 +1041,17 @@ abstract class AbstractRunAction extends \Civi\Api4\Generic\AbstractAction {
       'key' => '',
       'conditions' => [],
     ];
+    // Conditions configured in the search display already reference fields by their
+    // full path (the admin UI offers the display's select fields), so they must not
+    // receive the join prefix which gets added to predefined conditions below.
+    $displayConditions = $link['conditions'];
+    // Backward-compat: search displays created prior to 6.4 only supported 1 condition
+    if (!empty($link['condition'])) {
+      $displayConditions[] = $link['condition'];
+    }
+    unset($link['condition']);
+    // Only predefined conditions (supplied by the entity or the task) are gathered here
+    $link['conditions'] = [];
     $entity = $link['entity'];
     if ($entity && CoreUtil::entityExists($entity)) {
       $idKey = $this->getIdKeyName($entity);
@@ -1076,11 +1118,9 @@ abstract class AbstractRunAction extends \Civi\Api4\Generic\AbstractAction {
         $condition[0] = $link['prefix'] . $condition[0];
       }
     }
-    // Backward-compat: search displays created prior to 6.4 only supported 1 condition
-    if (!empty($link['condition'])) {
-      $link['conditions'][] = $link['condition'];
-    }
-    unset($link['condition']);
+    unset($condition);
+    // Combine predefined link conditions with those set in the search display
+    $link['conditions'] = array_merge($link['conditions'], $displayConditions);
   }
 
   /**
